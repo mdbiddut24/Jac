@@ -1,0 +1,217 @@
+import os
+import telebot
+import requests
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from flask import Flask, request, jsonify
+import web3
+from web3 import Web3
+
+# Initialize Flask app (for web interactions)
+app = Flask(__name__)
+
+# Initialize Telegram Bot
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+bot = telebot.TeleBot(API_TOKEN)
+
+# Web3 Configuration
+WEB3_PROVIDER = os.getenv('WEB3_PROVIDER', 'https://mainnet.infura.io/v3/YOUR_INFURA_KEY')
+w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
+CONTRACT_ADDRESS = '0xYOUR_CONTRACT_ADDRESS'
+with open('contract_abi.json') as f:
+    CONTRACT_ABI = json.load(f)
+contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+
+# In-memory storage (replace with database in production)
+user_data = {}
+
+# Telegram Bot Handlers
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    if user_id not in user_data:
+        user_data[user_id] = {
+            'wallet_address': None,
+            'energy': 100,
+            'goats': 0,
+            'last_action': None
+        }
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🦊 Connect Wallet", callback_data="connect_wallet"))
+    markup.add(InlineKeyboardButton("🖼 View My NFTs", callback_data="view_nfts"))
+    markup.add(InlineKeyboardButton("🐐 Play Goat Game", callback_data="play_game"))
+    markup.add(InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"))
+    
+    bot.reply_to(message, "🌟 Welcome to Web3 Goat World! 🌟\n\n"
+                 "Connect your wallet to start earning and playing with goats!", 
+                 reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    if call.data == "connect_wallet":
+        connect_wallet(call)
+    elif call.data == "view_nfts":
+        view_nfts(call)
+    elif call.data == "play_game":
+        play_game(call)
+    elif call.data == "leaderboard":
+        show_leaderboard(call)
+    elif call.data.startswith("game_"):
+        handle_game_action(call)
+
+def connect_wallet(call):
+    user_id = call.from_user.id
+    markup = InlineKeyboardMarkup()
+    
+    if user_data[user_id]['wallet_address']:
+        bot.answer_callback_query(call.id, f"Wallet already connected: {user_data[user_id]['wallet_address'][:6]}...")
+        return
+    
+    # URL for wallet connection web interface
+    connect_url = f"https://yourdomain.com/connect?user_id={user_id}"
+    markup.add(InlineKeyboardButton("Connect via MetaMask", url=connect_url))
+    
+    bot.send_message(call.message.chat.id, 
+                    "🔗 Connect your wallet by visiting the link below:",
+                    reply_markup=markup)
+
+def view_nfts(call):
+    user_id = call.from_user.id
+    if not user_data[user_id]['wallet_address']:
+        bot.answer_callback_query(call.id, "Please connect your wallet first!")
+        return
+    
+    nfts = get_nfts(user_data[user_id]['wallet_address'])
+    if not nfts:
+        bot.send_message(call.message.chat.id, "No NFTs found in your wallet!")
+        return
+    
+    message = "🎨 Your NFTs:\n\n"
+    for nft in nfts[:5]:  # Show first 5 due to message limits
+        message += f"✨ {nft.get('name', 'Unnamed NFT')}\n"
+        message += f"🔗 [View on OpenSea]({nft.get('permalink', '#')})\n\n"
+    
+    bot.send_message(call.message.chat.id, message, parse_mode='Markdown')
+
+def play_game(call):
+    user_id = call.from_user.id
+    if not user_data[user_id]['wallet_address']:
+        bot.answer_callback_query(call.id, "Please connect your wallet first!")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🌱 Feed Goat (10⚡)", callback_data="game_feed"))
+    markup.add(InlineKeyboardButton("❤️ Breed Goats (25⚡)", callback_data="game_breed"))
+    markup.add(InlineKeyboardButton("💰 Sell Goats", callback_data="game_sell"))
+    markup.add(InlineKeyboardButton("🎁 Daily Reward", callback_data="game_reward"))
+    
+    bot.send_message(call.message.chat.id, 
+                   f"🐐 Goat Ranch 🐐\n\n"
+                   f"Energy: {user_data[user_id]['energy']}⚡\n"
+                   f"Goats: {user_data[user_id]['goats']}\n"
+                   f"Address: {user_data[user_id]['wallet_address'][:6]}...{user_data[user_id]['wallet_address'][-4:]}",
+                   reply_markup=markup)
+
+def handle_game_action(call):
+    user_id = call.from_user.id
+    action = call.data.split('_')[1]
+    
+    if action == "feed" and user_data[user_id]['energy'] >= 10:
+        user_data[user_id]['energy'] -= 10
+        user_data[user_id]['goats'] += 1
+        bot.answer_callback_query(call.id, "You fed a goat! +1 goat")
+    elif action == "breed" and user_data[user_id]['energy'] >= 25:
+        user_data[user_id]['energy'] -= 25
+        user_data[user_id]['goats'] += 3
+        bot.answer_callback_query(call.id, "Goats bred successfully! +3 goats")
+    elif action == "sell":
+        goats = user_data[user_id]['goats']
+        if goats > 0:
+            # This would interact with your smart contract in a real implementation
+            user_data[user_id]['goats'] = 0
+            bot.answer_callback_query(call.id, f"Sold {goats} goats! Tokens sent to your wallet")
+        else:
+            bot.answer_callback_query(call.id, "No goats to sell!")
+    elif action == "reward":
+        user_data[user_id]['energy'] = min(100, user_data[user_id]['energy'] + 50)
+        bot.answer_callback_query(call.id, "Claimed daily reward! +50 energy")
+    else:
+        bot.answer_callback_query(call.id, "Not enough energy!")
+    
+    # Update the game message
+    play_game(call)
+
+def show_leaderboard(call):
+    # Sort users by number of goats
+    sorted_users = sorted(user_data.items(), key=lambda x: x[1].get('goats', 0), reverse=True)
+    
+    message = "🏆 Top Goat Farmers 🏆\n\n"
+    for i, (user_id, data) in enumerate(sorted_users[:10], 1):
+        message += f"{i}. {data.get('wallet_address', 'Unknown')[:6]}... - {data.get('goats', 0)} goats\n"
+    
+    bot.send_message(call.message.chat.id, message)
+
+# Web3 Functions
+def get_nfts(wallet_address):
+    try:
+        url = f"https://api.opensea.io/api/v1/assets?owner={wallet_address}"
+        headers = {"X-API-KEY": os.getenv('OPENSEA_API_KEY')}
+        response = requests.get(url, headers=headers)
+        return response.json().get('assets', []) if response.status_code == 200 else []
+    except Exception as e:
+        print(f"Error fetching NFTs: {e}")
+        return []
+
+# Flask Routes for Web Interaction
+@app.route('/connect', methods=['GET'])
+def web_connect():
+    user_id = request.args.get('user_id')
+    return f"""
+    <html>
+        <head>
+            <title>Connect Wallet</title>
+            <script src="https://cdn.jsdelivr.net/npm/web3@1.5.2/dist/web3.min.js"></script>
+        </head>
+        <body>
+            <h1>Connect your wallet</h1>
+            <button onclick="connectWallet()">Connect MetaMask</button>
+            <script>
+                async function connectWallet() {{
+                    if (window.ethereum) {{
+                        try {{
+                            const accounts = await window.ethereum.request({{ method: 'eth_requestAccounts' }});
+                            const walletAddress = accounts[0];
+                            window.location.href = `https://api.yourdomain.com/wallet_connected?user_id={user_id}&address=${{walletAddress}}`;
+                        }} catch (error) {{
+                            alert('Connection failed: ' + error.message);
+                        }}
+                    }} else {{
+                        alert('Please install MetaMask!');
+                    }}
+                }}
+            </script>
+        </body>
+    </html>
+    """
+
+@app.route('/wallet_connected', methods=['GET'])
+def wallet_connected():
+    user_id = request.args.get('user_id')
+    wallet_address = request.args.get('address')
+    
+    if user_id in user_data:
+        user_data[user_id]['wallet_address'] = wallet_address
+        # Send confirmation to Telegram
+        bot.send_message(user_id, f"✅ Wallet connected successfully!\n\nAddress: {wallet_address}")
+        return "Wallet connected! You can return to Telegram now."
+    return "User not found"
+
+# Start the bot
+if __name__ == '__main__':
+    # Start Flask server in a thread
+    import threading
+    flask_thread = threading.Thread(target=app.run, kwargs={'port': 5000, 'host': '0.0.0.0'})
+    flask_thread.start()
+    
+    # Start Telegram bot
+    bot.polling()
